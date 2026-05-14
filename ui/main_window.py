@@ -424,6 +424,8 @@ class MainWindow(QMainWindow):
                 self._sim_info_text.clear()
                 self.statusBar().showMessage(
                     f"{t['name']}  |  Band {t['band']}  EARFCN {t['dl_earfcn']}")
+                # Auto-generate SIM immediately on tower select
+                self._gen_sim_for_tower()
         else:
             self._selected_tower = None
 
@@ -558,10 +560,20 @@ class MainWindow(QMainWindow):
         if not sim:
             if not self._selected_tower:
                 QMessageBox.information(self, "Info",
-                    "Сначала выберите вышку и нажмите «Generate SIM».")
+                    "Сначала выберите вышку.")
                 return
             sim = generate_sim_for_tower(self._selected_tower)
             self._active_tower_sim = sim
+
+        # Validate
+        if not sim.get("imsi") or not sim.get("ki") or not sim.get("opc"):
+            QMessageBox.critical(self, "Ошибка",
+                f"SIM профиль неполный!\n"
+                f"IMSI: {sim.get('imsi','(пусто)')}\n"
+                f"Ki:   {sim.get('ki','(пусто)')}\n"
+                f"OPc:  {sim.get('opc','(пусто)')}\n\n"
+                "Нажми «Generate SIM for this tower» заново.")
+            return
 
         folder = QFileDialog.getExistingDirectory(self, "Папка для .grsp файла")
         if not folder:
@@ -569,7 +581,10 @@ class MainWindow(QMainWindow):
         path = export_grsp(sim, folder)
         QMessageBox.information(self, "Готово",
             f"Файл сохранён:\n{path}\n\n"
-            f"Открой его в GRSIMWrite → нажми Write Card → вставь blank SIM.")
+            f"IMSI: {sim['imsi']}\n"
+            f"Ki:   {sim['ki']}\n"
+            f"OPc:  {sim['opc']}\n\n"
+            "Открой в GRSIMWrite → Write Card → вставь blank SIM.")
 
     def _export_sim_grsp(self):
         if not self._selected_sim:
