@@ -1,20 +1,28 @@
-"""Main application window."""
+"""Main application window — srsRAN Manager."""
 from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
+import shutil
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QSplitter, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem,
     QTabWidget, QHeaderView, QAbstractItemView, QFileDialog,
-    QMessageBox, QStatusBar, QFrame, QScrollArea, QSizePolicy,
-    QToolBar, QApplication
+    QMessageBox, QStatusBar, QFrame, QSizePolicy,
+    QToolBar, QApplication, QGroupBox, QTextEdit, QProgressBar,
+    QScrollArea
 )
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon, QFont, QColor, QAction
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QFont, QAction
 
 from core.tower_database import TowerDatabase, STATE_NAMES, CARRIER_COLORS, BAND_FREQ
-from core.config_generator import export_tower_configs, export_ue_conf, generate_ue_conf
+from core.config_generator import (
+    export_tower_configs, export_ue_conf, generate_ue_conf,
+    generate_epc_conf, generate_user_db, export_full_bundle,
+    generate_sim_for_tower
+)
+from core.grsp_exporter import export_grsp
 from core.grsp_importer import import_grsp_files
 from ui.tower_editor import TowerEditorDialog
 from ui.sim_editor import SimEditorDialog
@@ -29,98 +37,75 @@ class MainWindow(QMainWindow):
         self._state_buttons: dict[str, QPushButton] = {}
         self._selected_tower: dict | None = None
         self._selected_sim: dict | None = None
+        self._active_tower_sim: dict | None = None   # auto-generated SIM for current tower
         self.setWindowTitle("srsRAN Manager — US LTE Base Station Profiles")
-        self.setMinimumSize(1200, 740)
+        self.setMinimumSize(1280, 760)
         self._build_ui()
         self._select_state(list(STATE_NAMES.keys())[0])
 
-    # ── UI construction ─────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # UI BUILD
+    # ══════════════════════════════════════════════════════════════════════
 
     def _build_ui(self):
-        # Toolbar
         self._build_toolbar()
 
-        # Central area: sidebar + main content
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Sidebar
-        sidebar = self._build_sidebar()
-        root.addWidget(sidebar)
+        root.addWidget(self._build_sidebar())
 
-        # Vertical separator
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setStyleSheet("background:#2a2d36;")
         sep.setFixedWidth(1)
         root.addWidget(sep)
 
-        # Tab area
         self._tabs = QTabWidget()
-        self._tabs.setObjectName("mainTabs")
         root.addWidget(self._tabs, 1)
 
-        # Tab 1: Towers
-        self._tower_tab = self._build_tower_tab()
-        self._tabs.addTab(self._tower_tab, "  Base Stations  ")
+        self._tower_tab  = self._build_tower_tab()
+        self._sim_tab    = self._build_sim_tab()
+        self._launch_tab = self._build_launch_tab()
 
-        # Tab 2: SIM Profiles
-        self._sim_tab = self._build_sim_tab()
-        self._tabs.addTab(self._sim_tab, "  SIM Profiles  ")
+        self._tabs.addTab(self._tower_tab,  "  Base Stations  ")
+        self._tabs.addTab(self._sim_tab,    "  SIM Profiles  ")
+        self._tabs.addTab(self._launch_tab, "  Launch srsRAN  ")
 
-        # Tab 3: Config Preview
-        self._preview_tab = self._build_preview_tab()
-        self._tabs.addTab(self._preview_tab, "  Quick Preview  ")
-
-        # Status bar
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Ready — srsRAN Manager v1.0")
+        self.statusBar().showMessage("Ready — select a tower to begin")
 
     def _build_toolbar(self):
         tb = QToolBar("Main")
         tb.setMovable(False)
-        tb.setIconSize(QSize(20, 20))
-        tb.setObjectName("mainToolbar")
+        tb.setIconSize(QSize(18, 18))
 
-        act_add_tower = QAction("+ Add Tower", self)
-        act_add_tower.setStatusTip("Add a new tower profile")
-        act_add_tower.triggered.connect(self._add_tower)
-        tb.addAction(act_add_tower)
-
-        act_add_sim = QAction("+ Add SIM", self)
-        act_add_sim.setStatusTip("Add a new SIM profile")
-        act_add_sim.triggered.connect(self._add_sim)
-        tb.addAction(act_add_sim)
-
-        act_import_grsp = QAction("Import .grsp…", self)
-        act_import_grsp.setStatusTip("Import SIM profiles from GRSIMWrite .grsp files")
-        act_import_grsp.triggered.connect(self._import_grsp)
-        tb.addAction(act_import_grsp)
+        for label, tip, slot in [
+            ("+ Tower",       "Add tower profile",              self._add_tower),
+            ("+ SIM",         "Add SIM profile manually",       self._add_sim),
+            ("Import .grsp…", "Import SIM from GRSIMWrite file",self._import_grsp),
+        ]:
+            a = QAction(label, self)
+            a.setStatusTip(tip)
+            a.triggered.connect(slot)
+            tb.addAction(a)
 
         tb.addSeparator()
 
-        act_export = QAction("Export configs…", self)
-        act_export.setStatusTip("Export srsRAN config files to a folder")
-        act_export.triggered.connect(self._export_selected)
-        tb.addAction(act_export)
+        act_bundle = QAction("Export bundle…", self)
+        act_bundle.setStatusTip("Export all configs + .grsp for selected tower")
+        act_bundle.triggered.connect(self._export_bundle)
+        tb.addAction(act_bundle)
 
-        act_wsl = QAction("Deploy to WSL2", self)
-        act_wsl.setStatusTip("Copy configs to WSL2 srsRAN config directory")
-        act_wsl.triggered.connect(self._deploy_to_wsl)
-        tb.addAction(act_wsl)
-
-        tb.addSeparator()
-
-        # right-align info label
-        spacer = QWidget(); spacer.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
 
-        lbl = QLabel("  srsRAN 4G Manager  ")
-        lbl.setStyleSheet("color:#4a5880; font-weight:bold; font-size:12px;")
+        lbl = QLabel("  srsRAN Manager  ")
+        lbl.setStyleSheet("color:#3a4a70; font-weight:bold; font-size:12px;")
         tb.addWidget(lbl)
 
         self.addToolBar(tb)
@@ -128,96 +113,88 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(190)
+        sidebar.setFixedWidth(195)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(8, 12, 8, 12)
-        layout.setSpacing(4)
+        layout.setSpacing(3)
 
         lbl = QLabel("STATES")
         lbl.setStyleSheet("color:#3a4560; font-size:10px; font-weight:bold; "
-                          "letter-spacing:1.5px; padding: 4px 8px 6px 8px;")
+                          "letter-spacing:1.5px; padding:4px 8px 6px 8px;")
         layout.addWidget(lbl)
 
         for code in sorted(STATE_NAMES.keys()):
-            name = STATE_NAMES[code]
+            name  = STATE_NAMES[code]
             count = len(self.db.towers(code))
-            btn = QPushButton(f"{code}  {name}\n{count} towers")
+            btn   = QPushButton(f"{code}  {name}\n{count} towers")
             btn.setObjectName("stateBtn")
-            btn.setCheckable(False)
             btn.setProperty("active", "false")
-            btn.clicked.connect(lambda checked, c=code: self._select_state(c))
+            btn.clicked.connect(lambda _, c=code: self._select_state(c))
             self._state_buttons[code] = btn
             layout.addWidget(btn)
 
         layout.addStretch()
-
-        # Stats
         total = sum(len(self.db.towers(s)) for s in self.db.states())
-        lbl_total = QLabel(f"Total towers: {total}")
-        lbl_total.setStyleSheet("color:#3a4560; font-size:11px; padding:4px 8px;")
-        layout.addWidget(lbl_total)
-
+        lbl2 = QLabel(f"Total: {total} towers")
+        lbl2.setStyleSheet("color:#2a3450; font-size:11px; padding:4px 8px;")
+        layout.addWidget(lbl2)
         return sidebar
+
+    # ── Tower tab ──────────────────────────────────────────────────────────
 
     def _build_tower_tab(self) -> QWidget:
         w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+        vbox = QVBoxLayout(w)
+        vbox.setContentsMargins(16, 12, 16, 12)
+        vbox.setSpacing(8)
 
-        # Header row
         hdr = QHBoxLayout()
         self._state_label = QLabel("Select a state")
         self._state_label.setObjectName("heading")
         hdr.addWidget(self._state_label)
         hdr.addStretch()
+        for label, obj, slot in [
+            ("+ Add",          "btnSuccess", self._add_tower),
+            ("Edit",           "",           self._edit_tower),
+            ("Delete",         "btnDanger",  self._delete_tower),
+            ("View Config",    "btnPrimary", self._view_tower_config),
+        ]:
+            b = QPushButton(label)
+            if obj: b.setObjectName(obj)
+            b.clicked.connect(slot)
+            hdr.addWidget(b)
+        vbox.addLayout(hdr)
 
-        btn_add = QPushButton("+ Add Tower")
-        btn_add.setObjectName("btnSuccess")
-        btn_add.clicked.connect(self._add_tower)
-        hdr.addWidget(btn_add)
-
-        btn_edit = QPushButton("Edit")
-        btn_edit.clicked.connect(self._edit_tower)
-        hdr.addWidget(btn_edit)
-
-        btn_del = QPushButton("Delete")
-        btn_del.setObjectName("btnDanger")
-        btn_del.clicked.connect(self._delete_tower)
-        hdr.addWidget(btn_del)
-
-        btn_cfg = QPushButton("View / Export Config")
-        btn_cfg.setObjectName("btnPrimary")
-        btn_cfg.clicked.connect(self._view_tower_config)
-        hdr.addWidget(btn_cfg)
-
-        layout.addLayout(hdr)
-
-        # Tower table
         self._tower_table = QTableWidget(0, 9)
-        self._tower_table.setHorizontalHeaderLabels([
-            "ID", "Name", "City", "Carrier", "Band", "EARFCN", "PCI", "TAC", "TX Power"
-        ])
+        self._tower_table.setHorizontalHeaderLabels(
+            ["ID", "Name", "City", "Carrier", "Band", "EARFCN", "PCI", "TAC", "TX Power"])
         self._tower_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch)
-        self._tower_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents)
         self._tower_table.verticalHeader().setVisible(False)
         self._tower_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tower_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tower_table.setAlternatingRowColors(True)
         self._tower_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._tower_table.selectionModel().selectionChanged.connect(self._on_tower_selected)
-        self._tower_table.doubleClicked.connect(lambda _: self._edit_tower())
-        layout.addWidget(self._tower_table, 1)
+        self._tower_table.doubleClicked.connect(lambda _: self._view_tower_config())
+        vbox.addWidget(self._tower_table, 1)
+
+        # Selected tower info bar
+        self._tower_info = QLabel("No tower selected")
+        self._tower_info.setStyleSheet(
+            "background:#141820; color:#4a5880; padding:6px 12px; "
+            "border-radius:5px; font-size:12px;")
+        vbox.addWidget(self._tower_info)
 
         return w
 
+    # ── SIM tab ────────────────────────────────────────────────────────────
+
     def _build_sim_tab(self) -> QWidget:
         w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+        vbox = QVBoxLayout(w)
+        vbox.setContentsMargins(16, 12, 16, 12)
+        vbox.setSpacing(8)
 
         hdr = QHBoxLayout()
         lbl = QLabel("SIM Card Profiles")
@@ -225,36 +202,24 @@ class MainWindow(QMainWindow):
         hdr.addWidget(lbl)
         hdr.addStretch()
 
-        btn_add = QPushButton("+ Add SIM")
-        btn_add.setObjectName("btnSuccess")
-        btn_add.clicked.connect(self._add_sim)
-        hdr.addWidget(btn_add)
+        for label, obj, slot in [
+            ("+ Add SIM",      "btnSuccess", self._add_sim),
+            ("Import .grsp…",  "",           self._import_grsp),
+            ("Edit",           "",           self._edit_sim),
+            ("Delete",         "btnDanger",  self._delete_sim),
+            ("Export .grsp",   "btnPrimary", self._export_sim_grsp),
+            ("Export ue.conf", "",           self._export_ue_conf),
+        ]:
+            b = QPushButton(label)
+            if obj: b.setObjectName(obj)
+            b.clicked.connect(slot)
+            hdr.addWidget(b)
 
-        btn_import = QPushButton("Import .grsp…")
-        btn_import.setToolTip("Import SIM profiles from GRSIMWrite .grsp / .grps files")
-        btn_import.clicked.connect(self._import_grsp)
-        hdr.addWidget(btn_import)
-
-        btn_edit = QPushButton("Edit")
-        btn_edit.clicked.connect(self._edit_sim)
-        hdr.addWidget(btn_edit)
-
-        btn_del = QPushButton("Delete")
-        btn_del.setObjectName("btnDanger")
-        btn_del.clicked.connect(self._delete_sim)
-        hdr.addWidget(btn_del)
-
-        btn_exp = QPushButton("Export ue.conf")
-        btn_exp.setObjectName("btnPrimary")
-        btn_exp.clicked.connect(self._export_ue_conf)
-        hdr.addWidget(btn_exp)
-
-        layout.addLayout(hdr)
+        vbox.addLayout(hdr)
 
         self._sim_table = QTableWidget(0, 7)
-        self._sim_table.setHorizontalHeaderLabels([
-            "ID", "Name", "Carrier", "Mode", "MCC", "MNC", "IMSI"
-        ])
+        self._sim_table.setHorizontalHeaderLabels(
+            ["ID", "Name", "Carrier", "Mode", "MCC", "MNC", "IMSI"])
         self._sim_table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch)
         self._sim_table.verticalHeader().setVisible(False)
@@ -264,82 +229,157 @@ class MainWindow(QMainWindow):
         self._sim_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._sim_table.selectionModel().selectionChanged.connect(self._on_sim_selected)
         self._sim_table.doubleClicked.connect(lambda _: self._edit_sim())
-        layout.addWidget(self._sim_table, 1)
+        vbox.addWidget(self._sim_table, 1)
 
         self._refresh_sim_table()
         return w
 
-    def _build_preview_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(16, 12, 16, 12)
-        layout.setSpacing(8)
+    # ── Launch tab ─────────────────────────────────────────────────────────
 
-        lbl = QLabel("Quick Preview — select a tower and open config")
-        lbl.setObjectName("subheading")
-        layout.addWidget(lbl)
+    def _build_launch_tab(self) -> QWidget:
+        w = QWidget()
+        vbox = QVBoxLayout(w)
+        vbox.setContentsMargins(20, 16, 20, 16)
+        vbox.setSpacing(14)
+
+        # ── Selected tower/SIM info ──
+        self._launch_info = QLabel("Select a tower in Base Stations tab")
+        self._launch_info.setStyleSheet(
+            "background:#141820; color:#60a0e0; padding:10px 14px; "
+            "border-radius:7px; font-size:13px; font-weight:bold;")
+        self._launch_info.setWordWrap(True)
+        vbox.addWidget(self._launch_info)
+
+        # ── Action buttons ──
+        btn_row1 = QHBoxLayout()
+        btn_row1.setSpacing(10)
+
+        self._btn_gen_sim = QPushButton("1. Generate SIM for this tower")
+        self._btn_gen_sim.setObjectName("btnSuccess")
+        self._btn_gen_sim.setMinimumHeight(44)
+        self._btn_gen_sim.setToolTip("Auto-generate IMSI/Ki/OPc matched to selected tower's MCC/MNC")
+        self._btn_gen_sim.clicked.connect(self._gen_sim_for_tower)
+        btn_row1.addWidget(self._btn_gen_sim)
+
+        self._btn_export_grsp = QPushButton("2. Export .grsp (flash SIM)")
+        self._btn_export_grsp.setObjectName("btnPrimary")
+        self._btn_export_grsp.setMinimumHeight(44)
+        self._btn_export_grsp.setToolTip("Save .grsp file to open in GRSIMWrite and flash blank SIM card")
+        self._btn_export_grsp.clicked.connect(self._export_bundle_grsp)
+        btn_row1.addWidget(self._btn_export_grsp)
+
+        self._btn_export_all = QPushButton("3. Export all configs")
+        self._btn_export_all.setMinimumHeight(44)
+        self._btn_export_all.setToolTip("Save enb.conf / rr.conf / sib.conf / epc.conf / user_db.csv / ue.conf")
+        self._btn_export_all.clicked.connect(self._export_bundle)
+        btn_row1.addWidget(self._btn_export_all)
+
+        vbox.addLayout(btn_row1)
+
+        # ── WSL2 Launch ──
+        grp_wsl = QGroupBox("Launch srsRAN in WSL2 (Windows)")
+        wsl_layout = QVBoxLayout(grp_wsl)
+        wsl_layout.setSpacing(10)
 
         info = QLabel(
-            "Select a tower in the <b>Base Stations</b> tab, then click "
-            "<b>View / Export Config</b> to preview and export:\n"
-            "  • <b>enb.conf</b> — main eNodeB config\n"
-            "  • <b>rr.conf</b>  — radio resources (EARFCN, PCI, TAC)\n"
-            "  • <b>sib.conf</b> — system information blocks\n"
-            "  • <b>ue.conf</b>  — UE / SIM card config\n\n"
-            "Or use the <b>Export configs…</b> toolbar button to batch-export to a folder."
+            "Кнопки ниже деплоят конфиги в WSL2 и запускают srsepc / srsenb в отдельных окнах.\n"
+            "LimeSDR должен быть подключён. В WSL2 должен быть установлен srsRAN_4G + SoapySDR."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color:#6070a0; font-size:13px; line-height:160%; "
-                           "background:#1a1d28; padding:16px; border-radius:8px;")
-        layout.addWidget(info)
+        info.setStyleSheet("color:#5a6888; font-size:12px;")
+        wsl_layout.addWidget(info)
 
-        # WSL2 deploy instructions
-        wsl_box = QFrame()
-        wsl_box.setStyleSheet("background:#161e28; border:1px solid #2a3050; "
-                              "border-radius:8px; padding:4px;")
-        wsl_layout = QVBoxLayout(wsl_box)
-        wsl_lbl = QLabel("<b style='color:#60a0e0'>WSL2 Quick Deploy</b>")
-        wsl_layout.addWidget(wsl_lbl)
-        wsl_steps = QLabel(
-            "1. Install WSL2 on Windows: <code>wsl --install</code>\n"
-            "2. Inside WSL2 (Ubuntu), install srsRAN:\n"
-            "   <code>sudo apt install cmake libfftw3-dev libmbedtls-dev \\\n"
-            "         libboost-all-dev libconfig++-dev libsctp-dev</code>\n"
-            "   <code>git clone https://github.com/srsRAN/srsRAN_4G.git</code>\n"
-            "   <code>cd srsRAN_4G && mkdir build && cd build</code>\n"
-            "   <code>cmake .. && make -j$(nproc)</code>\n"
-            "3. Use <b>Deploy to WSL2</b> button above to copy configs to WSL2\n"
-            "4. Run: <code>sudo srsenb ~/.config/srsran/enb.conf</code>"
+        btn_row2 = QHBoxLayout()
+        btn_row2.setSpacing(10)
+
+        self._btn_deploy = QPushButton("Deploy configs to WSL2")
+        self._btn_deploy.setMinimumHeight(40)
+        self._btn_deploy.clicked.connect(self._deploy_to_wsl)
+        btn_row2.addWidget(self._btn_deploy)
+
+        self._btn_epc = QPushButton("Start EPC  (srsepc)")
+        self._btn_epc.setObjectName("btnSuccess")
+        self._btn_epc.setMinimumHeight(40)
+        self._btn_epc.clicked.connect(self._launch_epc)
+        btn_row2.addWidget(self._btn_epc)
+
+        self._btn_enb = QPushButton("Start eNB  (srsenb + LimeSDR)")
+        self._btn_enb.setObjectName("btnPrimary")
+        self._btn_enb.setMinimumHeight(40)
+        self._btn_enb.clicked.connect(self._launch_enb)
+        btn_row2.addWidget(self._btn_enb)
+
+        self._btn_stop = QPushButton("Stop all")
+        self._btn_stop.setObjectName("btnDanger")
+        self._btn_stop.setMinimumHeight(40)
+        self._btn_stop.clicked.connect(self._stop_all)
+        btn_row2.addWidget(self._btn_stop)
+
+        wsl_layout.addLayout(btn_row2)
+
+        # Status
+        self._wsl_status = QLabel("WSL2 status: not checked")
+        self._wsl_status.setStyleSheet("color:#4a5870; font-size:12px; padding:2px;")
+        wsl_layout.addWidget(self._wsl_status)
+
+        vbox.addWidget(grp_wsl)
+
+        # ── SIM card info box ──
+        self._grp_sim_info = QGroupBox("Generated SIM — ready to flash")
+        sim_info_layout = QVBoxLayout(self._grp_sim_info)
+        self._sim_info_text = QTextEdit()
+        self._sim_info_text.setReadOnly(True)
+        self._sim_info_text.setMaximumHeight(140)
+        self._sim_info_text.setFont(QFont("Consolas", 11))
+        self._sim_info_text.setStyleSheet(
+            "background:#0e1218; color:#80e8a0; border:none;")
+        self._sim_info_text.setPlaceholderText(
+            "Нажми «Generate SIM for this tower» — данные появятся здесь")
+        sim_info_layout.addWidget(self._sim_info_text)
+        self._grp_sim_info.setVisible(False)
+        vbox.addWidget(self._grp_sim_info)
+
+        # ── WSL2 install instructions ──
+        grp_install = QGroupBox("Установка srsRAN в WSL2 (один раз)")
+        inst_layout = QVBoxLayout(grp_install)
+        inst_text = QTextEdit()
+        inst_text.setReadOnly(True)
+        inst_text.setMaximumHeight(130)
+        inst_text.setFont(QFont("Consolas", 10))
+        inst_text.setPlainText(
+            "# 1. PowerShell (admin): wsl --install  →  перезагрузка\n"
+            "# 2. В WSL2 Ubuntu:\n"
+            "sudo apt update && sudo apt install -y build-essential cmake git \\\n"
+            "  libfftw3-dev libmbedtls-dev libboost-all-dev \\\n"
+            "  libconfig++-dev libsctp-dev libzmq3-dev \\\n"
+            "  soapysdr-tools soapysdr-module-lms7\n"
+            "git clone https://github.com/srsRAN/srsRAN_4G.git\n"
+            "cd srsRAN_4G && mkdir build && cd build\n"
+            "cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)\n"
+            "sudo make install && srsran_install_configs.sh user"
         )
-        wsl_steps.setWordWrap(True)
-        wsl_steps.setStyleSheet("font-size:12px; font-family:Consolas; "
-                                "color:#8090b0; line-height:160%;")
-        wsl_layout.addWidget(wsl_steps)
-        layout.addWidget(wsl_box)
+        inst_layout.addWidget(inst_text)
+        vbox.addWidget(grp_install)
 
-        layout.addStretch()
+        vbox.addStretch()
         return w
 
-    # ── State selection ──────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # STATE / TABLE LOGIC
+    # ══════════════════════════════════════════════════════════════════════
 
     def _select_state(self, state: str):
-        # Update buttons
         for code, btn in self._state_buttons.items():
             active = code == state
             btn.setProperty("active", "true" if active else "false")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
+            btn.style().unpolish(btn); btn.style().polish(btn)
 
         self._current_state = state
-        full_name = STATE_NAMES.get(state, state)
         towers = self.db.towers(state)
         self._state_label.setText(
-            f"{full_name}  <span style='color:#4a6088; font-size:14px;'>"
-            f"({len(towers)} towers)</span>"
-        )
+            f"{STATE_NAMES.get(state, state)}  "
+            f"<span style='color:#3a5080; font-size:14px;'>({len(towers)} towers)</span>")
         self._refresh_tower_table(towers)
-
-    # ── Tower table ──────────────────────────────────────────────────────
 
     def _refresh_tower_table(self, towers: list[dict]):
         tbl = self._tower_table
@@ -347,45 +387,45 @@ class MainWindow(QMainWindow):
         for t in towers:
             row = tbl.rowCount()
             tbl.insertRow(row)
-            cells = [
-                t['id'],
-                t['name'],
-                t['city'],
-                t['carrier'],
-                f"B{t['band']} ({BAND_FREQ.get(t['band'], '')})",
-                str(t['dl_earfcn']),
-                str(t['pci']),
-                str(t['tac']),
-                f"{t['tx_power']} dBm",
-            ]
-            for col, val in enumerate(cells):
+            for col, val in enumerate([
+                t['id'], t['name'], t['city'], t['carrier'],
+                f"B{t['band']} ({BAND_FREQ.get(t['band'],'')})",
+                str(t['dl_earfcn']), str(t['pci']), str(t['tac']),
+                f"{t['tx_power']} dBm"
+            ]):
                 item = QTableWidgetItem(val)
                 item.setData(Qt.ItemDataRole.UserRole, t['id'])
-                if col == 3:  # carrier column - color code
-                    color = CARRIER_COLORS.get(t['carrier'], "#607090")
-                    item.setForeground(QColor(color))
-                    font = item.font(); font.setBold(True); item.setFont(font)
+                if col == 3:
+                    item.setForeground(QColor(CARRIER_COLORS.get(t['carrier'], "#607090")))
+                    f = item.font(); f.setBold(True); item.setFont(f)
                 tbl.setItem(row, col, item)
         tbl.resizeColumnsToContents()
-        tbl.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch)
+        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
     def _on_tower_selected(self):
         rows = self._tower_table.selectionModel().selectedRows()
         if rows:
-            tower_id = self._tower_table.item(rows[0].row(), 0).text()
-            self._selected_tower = self.db.tower_by_id(tower_id)
+            tid = self._tower_table.item(rows[0].row(), 0).text()
+            self._selected_tower = self.db.tower_by_id(tid)
             if self._selected_tower:
                 t = self._selected_tower
-                self.statusBar().showMessage(
-                    f"Selected: {t['name']}  |  "
+                self._tower_info.setText(
+                    f"Selected:  {t['name']}  |  "
                     f"Band {t['band']}  EARFCN {t['dl_earfcn']}  "
-                    f"PCI {t['pci']}  TAC {t['tac']}"
-                )
+                    f"PCI {t['pci']}  TAC {t['tac']}  "
+                    f"MCC {t['mcc']} MNC {t['mnc']}")
+                self._launch_info.setText(
+                    f"Tower:  {t['name']}\n"
+                    f"Band {t['band']}  ·  EARFCN {t['dl_earfcn']}  ·  "
+                    f"PCI {t['pci']}  ·  {t['carrier']}  ·  "
+                    f"MCC {t['mcc']} MNC {t['mnc']}")
+                self._active_tower_sim = None
+                self._grp_sim_info.setVisible(False)
+                self._sim_info_text.clear()
+                self.statusBar().showMessage(
+                    f"{t['name']}  |  Band {t['band']}  EARFCN {t['dl_earfcn']}")
         else:
             self._selected_tower = None
-
-    # ── SIM table ────────────────────────────────────────────────────────
 
     def _refresh_sim_table(self):
         tbl = self._sim_table
@@ -393,31 +433,31 @@ class MainWindow(QMainWindow):
         for s in self.db.sims():
             row = tbl.rowCount()
             tbl.insertRow(row)
-            cells = [
-                s['id'], s['name'], s.get('carrier', ''),
-                s.get('mode', ''), s.get('mcc', ''),
-                s.get('mnc', ''), s.get('imsi', '—')
-            ]
-            for col, val in enumerate(cells):
+            for col, val in enumerate([
+                s['id'], s['name'], s.get('carrier',''),
+                s.get('mode',''), s.get('mcc',''),
+                s.get('mnc',''), s.get('imsi','—')
+            ]):
                 item = QTableWidgetItem(val)
                 item.setData(Qt.ItemDataRole.UserRole, s['id'])
-                if col == 3:  # mode
+                if col == 3:
                     item.setForeground(
                         QColor("#80e880") if val == "soft" else QColor("#e0a050"))
                 tbl.setItem(row, col, item)
         tbl.resizeColumnsToContents()
-        tbl.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch)
+        tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
 
     def _on_sim_selected(self):
         rows = self._sim_table.selectionModel().selectedRows()
         if rows:
-            sim_id = self._sim_table.item(rows[0].row(), 0).text()
-            self._selected_sim = self.db.sim_by_id(sim_id)
+            sid = self._sim_table.item(rows[0].row(), 0).text()
+            self._selected_sim = self.db.sim_by_id(sid)
         else:
             self._selected_sim = None
 
-    # ── CRUD actions ─────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # CRUD
+    # ══════════════════════════════════════════════════════════════════════
 
     def _add_tower(self):
         state = self._current_state or "CO"
@@ -429,26 +469,21 @@ class MainWindow(QMainWindow):
 
     def _edit_tower(self):
         if not self._selected_tower:
-            QMessageBox.information(self, "Info", "Select a tower first.")
+            QMessageBox.information(self, "Info", "Выберите вышку.")
             return
         dlg = TowerEditorDialog(self._selected_tower, parent=self)
         if dlg.exec() == TowerEditorDialog.DialogCode.Accepted:
-            updated = dlg.result_tower()
-            self.db.save_tower(updated)
-            # If state changed, refresh old state and new state
+            self.db.save_tower(dlg.result_tower())
             self._select_state(self._current_state)
 
     def _delete_tower(self):
         if not self._selected_tower:
-            QMessageBox.information(self, "Info", "Select a tower first.")
             return
         t = self._selected_tower
-        ret = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Delete tower <b>{t['name']}</b>?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Удалить",
+                f"Удалить вышку <b>{t['name']}</b>?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
             self.db.delete_tower(t['id'])
             self._selected_tower = None
             self._select_state(self._current_state)
@@ -462,7 +497,7 @@ class MainWindow(QMainWindow):
 
     def _edit_sim(self):
         if not self._selected_sim:
-            QMessageBox.information(self, "Info", "Select a SIM profile first.")
+            QMessageBox.information(self, "Info", "Выберите SIM профиль.")
             return
         dlg = SimEditorDialog(self._selected_sim, parent=self)
         if dlg.exec() == SimEditorDialog.DialogCode.Accepted:
@@ -471,162 +506,255 @@ class MainWindow(QMainWindow):
 
     def _delete_sim(self):
         if not self._selected_sim:
-            QMessageBox.information(self, "Info", "Select a SIM profile first.")
             return
         s = self._selected_sim
-        ret = QMessageBox.question(
-            self, "Confirm Delete",
-            f"Delete SIM profile <b>{s['name']}</b>?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Удалить",
+                f"Удалить профиль <b>{s['name']}</b>?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
             self.db.delete_sim(s['id'])
             self._selected_sim = None
             self._refresh_sim_table()
 
-    # ── Config actions ───────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # CONFIG / GRSP ACTIONS
+    # ══════════════════════════════════════════════════════════════════════
 
     def _view_tower_config(self):
         if not self._selected_tower:
-            QMessageBox.information(self, "Info", "Select a tower first.")
+            QMessageBox.information(self, "Info", "Выберите вышку.")
             return
-        sim = self._selected_sim
+        sim = self._active_tower_sim or self._selected_sim
         dlg = ConfigViewerDialog(self._selected_tower, sim=sim, parent=self)
         dlg.exec()
 
-    def _export_selected(self):
+    def _gen_sim_for_tower(self):
         if not self._selected_tower:
-            QMessageBox.information(self, "Info", "Select a tower first.")
+            QMessageBox.information(self, "Info", "Сначала выберите вышку.")
             return
-        folder = QFileDialog.getExistingDirectory(self, "Select export folder")
+        t = self._selected_tower
+        sim = generate_sim_for_tower(t)
+        self._active_tower_sim = sim
+
+        # Show in info box
+        self._grp_sim_info.setVisible(True)
+        self._sim_info_text.setPlainText(
+            f"Tower  : {t['name']}\n"
+            f"IMSI   : {sim['imsi']}\n"
+            f"Ki     : {sim['ki']}\n"
+            f"OPc    : {sim['opc']}\n"
+            f"MCC    : {sim['mcc']}   MNC: {sim['mnc']}\n"
+            f"APN    : {sim['apn']}\n"
+            f"Mode   : Milenage\n\n"
+            f"→ Нажми «Export .grsp» чтобы прошить SIM\n"
+            f"→ Нажми «Export all configs» чтобы получить конфиги srsRAN"
+        )
+        self.statusBar().showMessage(
+            f"SIM создан: IMSI {sim['imsi']}  Ki {sim['ki'][:8]}…")
+
+    def _export_bundle_grsp(self):
+        """Export .grsp for active or selected SIM."""
+        sim = self._active_tower_sim or self._selected_sim
+        if not sim:
+            if not self._selected_tower:
+                QMessageBox.information(self, "Info",
+                    "Сначала выберите вышку и нажмите «Generate SIM».")
+                return
+            sim = generate_sim_for_tower(self._selected_tower)
+            self._active_tower_sim = sim
+
+        folder = QFileDialog.getExistingDirectory(self, "Папка для .grsp файла")
         if not folder:
             return
+        path = export_grsp(sim, folder)
+        QMessageBox.information(self, "Готово",
+            f"Файл сохранён:\n{path}\n\n"
+            f"Открой его в GRSIMWrite → нажми Write Card → вставь blank SIM.")
+
+    def _export_sim_grsp(self):
+        if not self._selected_sim:
+            QMessageBox.information(self, "Info", "Выберите SIM профиль.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Папка для .grsp файла")
+        if not folder:
+            return
+        path = export_grsp(self._selected_sim, folder)
+        QMessageBox.information(self, "Экспорт .grsp", f"Сохранено:\n{path}")
+
+    def _export_bundle(self):
+        if not self._selected_tower:
+            QMessageBox.information(self, "Info", "Выберите вышку.")
+            return
+        sim = self._active_tower_sim or self._selected_sim
+        if not sim:
+            sim = generate_sim_for_tower(self._selected_tower)
+            self._active_tower_sim = sim
+
+        folder = QFileDialog.getExistingDirectory(self, "Папка для конфигов")
+        if not folder:
+            return
+
         subfolder = os.path.join(folder, self._selected_tower['id'])
-        paths = export_tower_configs(self._selected_tower, subfolder)
-        if self._selected_sim:
-            paths.append(export_ue_conf(self._selected_sim, self._selected_tower, subfolder))
-        QMessageBox.information(
-            self, "Exported",
-            f"Saved {len(paths)} config file(s) to:\n{subfolder}"
-        )
+        paths = export_full_bundle(self._selected_tower, sim, subfolder)
+        grsp_path = export_grsp(sim, subfolder)
+        paths.append(grsp_path)
+
+        QMessageBox.information(self, "Экспорт завершён",
+            f"Сохранено {len(paths)} файлов в:\n{subfolder}\n\n"
+            + "\n".join(os.path.basename(p) for p in paths))
 
     def _export_ue_conf(self):
         if not self._selected_sim:
-            QMessageBox.information(self, "Info", "Select a SIM profile first.")
+            QMessageBox.information(self, "Info", "Выберите SIM профиль.")
             return
-        folder = QFileDialog.getExistingDirectory(self, "Select export folder")
+        folder = QFileDialog.getExistingDirectory(self, "Папка для ue.conf")
         if not folder:
             return
         path = export_ue_conf(self._selected_sim, self._selected_tower, folder)
-        QMessageBox.information(self, "Exported", f"Saved ue.conf to:\n{path}")
-
-    def _deploy_to_wsl(self):
-        if not self._selected_tower:
-            QMessageBox.information(self, "Info", "Select a tower to deploy.")
-            return
-
-        # Check if WSL is available (Windows only)
-        if sys.platform != "win32":
-            QMessageBox.information(
-                self, "WSL2 Deploy",
-                "WSL2 deploy is only available on Windows.\n\n"
-                "On Linux/Mac, use Export configs to export files directly."
-            )
-            return
-
-        try:
-            result = subprocess.run(
-                ["wsl", "--status"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode != 0:
-                raise RuntimeError("WSL not found")
-        except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired):
-            QMessageBox.warning(
-                self, "WSL2 Not Found",
-                "WSL2 does not appear to be installed or running.\n\n"
-                "Install WSL2: open PowerShell as admin and run:\n"
-                "  wsl --install"
-            )
-            return
-
-        # Export to temp dir, then copy via wsl cp
-        import tempfile, shutil
-        tmp = tempfile.mkdtemp(prefix="srsran_")
-        try:
-            paths = export_tower_configs(self._selected_tower, tmp)
-            if self._selected_sim:
-                paths.append(export_ue_conf(self._selected_sim, self._selected_tower, tmp))
-
-            wsl_dest = "/home/$USER/.config/srsran"
-            # Convert Windows path to WSL path
-            wsl_tmp = subprocess.run(
-                ["wsl", "wslpath", tmp.replace("\\", "/")],
-                capture_output=True, text=True
-            ).stdout.strip()
-
-            cmd = f"mkdir -p {wsl_dest} && cp {wsl_tmp}/* {wsl_dest}/"
-            proc = subprocess.run(
-                ["wsl", "bash", "-c", cmd],
-                capture_output=True, text=True, timeout=15
-            )
-            if proc.returncode == 0:
-                QMessageBox.information(
-                    self, "Deployed",
-                    f"Configs deployed to WSL2:\n{wsl_dest}\n\n"
-                    "To start srsENB in WSL2:\n"
-                    "  sudo srsenb ~/.config/srsran/enb.conf"
-                )
-            else:
-                QMessageBox.warning(self, "Deploy Failed",
-                                    f"WSL2 copy failed:\n{proc.stderr}")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        QMessageBox.information(self, "Экспорт", f"Сохранено:\n{path}")
 
     def _import_grsp(self):
-        """Import one or more GRSIMWrite .grsp files as SIM profiles."""
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select GRSIMWrite files",
+            self, "Выбери .grsp файлы",
             os.path.expanduser("~/Downloads"),
-            "GRSIMWrite files (*.grsp *.grps);;All files (*)"
+            "GRSIMWrite (*.grsp *.grps);;Все файлы (*)"
         )
         if not paths:
             return
-
         profiles, errors = import_grsp_files(paths)
-
         if errors:
-            QMessageBox.warning(
-                self, "Import Warnings",
-                "Some files could not be imported:\n" + "\n".join(errors)
-            )
-
+            QMessageBox.warning(self, "Предупреждения", "\n".join(errors))
         if not profiles:
             return
-
         for p in profiles:
             self.db.add_sim(p)
-
         self._refresh_sim_table()
-
-        # Switch to SIM tab
         self._tabs.setCurrentWidget(self._sim_tab)
+        lines = [f"✓  {p['name']}  IMSI: {p['imsi']}" for p in profiles]
+        QMessageBox.information(self, f"Импортировано {len(profiles)} профилей",
+                                "\n".join(lines))
 
-        # Show summary
-        lines = []
-        for p in profiles:
-            lines.append(
-                f"✓  {p['name']}\n"
-                f"   IMSI: {p['imsi']}  |  Ki: {p['ki'][:8]}…  |  OPc: {p['opc'][:8]}…"
+    # ══════════════════════════════════════════════════════════════════════
+    # WSL2 LAUNCH
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _check_wsl(self) -> bool:
+        if sys.platform != "win32":
+            self._wsl_status.setText("WSL2: не требуется (Linux/macOS)")
+            return False
+        try:
+            r = subprocess.run(["wsl", "--status"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                self._wsl_status.setText("WSL2: ✓ доступен")
+                return True
+        except Exception:
+            pass
+        self._wsl_status.setText("WSL2: не найден — установи через PowerShell: wsl --install")
+        return False
+
+    def _deploy_to_wsl(self):
+        if not self._selected_tower:
+            QMessageBox.information(self, "Info", "Выберите вышку.")
+            return
+        if sys.platform != "win32":
+            QMessageBox.information(self, "Deploy",
+                "На Linux/macOS скопируйте конфиги вручную через «Export all configs».")
+            return
+
+        sim = self._active_tower_sim or self._selected_sim
+        if not sim:
+            sim = generate_sim_for_tower(self._selected_tower)
+            self._active_tower_sim = sim
+
+        tmp = tempfile.mkdtemp(prefix="srsran_")
+        try:
+            export_full_bundle(self._selected_tower, sim, tmp)
+            # Convert Windows path to WSL path
+            wsl_tmp = subprocess.run(
+                ["wsl", "wslpath", tmp.replace("\\", "/")],
+                capture_output=True, text=True).stdout.strip()
+
+            wsl_dest = "~/.config/srsran"
+            cmd = (f"mkdir -p {wsl_dest} && "
+                   f"cp {wsl_tmp}/*.conf {wsl_dest}/ && "
+                   f"cp {wsl_tmp}/user_db.csv /tmp/srsran_user_db.csv && "
+                   f"echo OK")
+            r = subprocess.run(["wsl", "bash", "-c", cmd],
+                               capture_output=True, text=True, timeout=15)
+            if "OK" in r.stdout:
+                self._wsl_status.setText(
+                    f"WSL2: ✓ конфиги скопированы → {wsl_dest}")
+                QMessageBox.information(self, "Deploy OK",
+                    f"Конфиги скопированы в WSL2:\n{wsl_dest}\n\n"
+                    "Теперь нажми Start EPC, затем Start eNB")
+            else:
+                QMessageBox.warning(self, "Deploy ошибка",
+                                    r.stderr or "Неизвестная ошибка")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _wsl_open_terminal(self, title: str, bash_cmd: str):
+        """Open a new Windows Terminal / cmd window running a WSL2 command."""
+        # Try Windows Terminal first, fall back to cmd
+        wt = shutil.which("wt")
+        if wt:
+            subprocess.Popen([
+                "wt", "--title", title, "--",
+                "wsl", "bash", "-c",
+                f"{bash_cmd}; echo '--- Press Enter to close ---'; read"
+            ])
+        else:
+            subprocess.Popen(
+                f'start "{title}" wsl bash -c "{bash_cmd}; read"',
+                shell=True
             )
-        QMessageBox.information(
-            self, f"Imported {len(profiles)} SIM profile(s)",
-            "\n\n".join(lines)
-        )
 
-    # ── Helpers ──────────────────────────────────────────────────────────
+    def _launch_epc(self):
+        if not self._check_wsl():
+            if sys.platform != "win32":
+                QMessageBox.information(self, "Linux/macOS",
+                    "Запусти в терминале:\n"
+                    "sudo srsepc ~/.config/srsran/epc.conf")
+            return
+        self._wsl_open_terminal(
+            "srsEPC",
+            "sudo srsepc ~/.config/srsran/epc.conf"
+        )
+        self._wsl_status.setText("WSL2: ▶ srsepc запускается…")
+
+    def _launch_enb(self):
+        if not self._check_wsl():
+            if sys.platform != "win32":
+                QMessageBox.information(self, "Linux/macOS",
+                    "Запусти в терминале:\n"
+                    "sudo srsenb ~/.config/srsran/enb.conf "
+                    "--rf.device_name=soapy --rf.device_args=\"driver=lime\"")
+            return
+        self._wsl_open_terminal(
+            "srsENB-LimeSDR",
+            "sudo srsenb ~/.config/srsran/enb.conf "
+            "--rf.device_name=soapy --rf.device_args=\"driver=lime\""
+        )
+        self._wsl_status.setText("WSL2: ▶ srsenb (LimeSDR) запускается…")
+
+    def _stop_all(self):
+        if sys.platform == "win32":
+            subprocess.run(["wsl", "bash", "-c",
+                            "sudo pkill -f srsenb; sudo pkill -f srsepc"],
+                           capture_output=True)
+        else:
+            subprocess.run(["bash", "-c",
+                            "sudo pkill -f srsenb; sudo pkill -f srsepc"],
+                           capture_output=True)
+        self._wsl_status.setText("WSL2: ■ процессы остановлены")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # HELPERS
+    # ══════════════════════════════════════════════════════════════════════
 
     def _update_sidebar_count(self, state: str):
         if state in self._state_buttons:
             count = len(self.db.towers(state))
-            name = STATE_NAMES.get(state, state)
-            self._state_buttons[state].setText(f"{state}  {name}\n{count} towers")
+            self._state_buttons[state].setText(
+                f"{state}  {STATE_NAMES.get(state, state)}\n{count} towers")
