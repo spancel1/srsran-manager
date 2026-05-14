@@ -1,0 +1,79 @@
+{
+  "profiles": [
+    {
+      "id": "SIM-001",
+      "name": "AT&T Test SIM #1",
+      "carrier": "AT&T",
+      "imsi": "310410000000001",
+      "imei": "353490069873456",
+      "ki": "8BAF473F2F8FD09487CCCBD7097C6862",
+      "opc": "8E27B6AF0E692E750F32667A3B14605D",
+      "amf": "8000",
+      "sqn": "000000001496",
+      "mcc": "310",
+      "mnc": "410",
+      "apn": "broadband",
+      "mode": "soft"
+    },
+    {
+      "id": "SIM-002",
+      "name": "Verizon Test SIM #1",
+      "carrier": "Verizon",
+      "imsi": "311480000000001",
+      "imei": "356938035643809",
+      "ki": "465B5CE8B199B49FAA5F0A2EE238A6BC",
+      "opc": "CD63CB71954A9F4688D8FB68BF2DCA68",
+      "amf": "8000",
+      "sqn": "000000000921",
+      "mcc": "311",
+      "mnc": "480",
+      "apn": "vzwinternet",
+      "mode": "soft"
+    },
+    {
+      "id": "SIM-003",
+      "name": "T-Mobile Test SIM #1",
+      "carrier": "T-Mobile",
+      "imsi": "310260000000001",
+      "imei": "358034065544979",
+      "ki": "FECBB4E84F2E93219C1B4CC52E9C0012",
+      "opc": "1F6F4ED60A4AE9AC13AA9A86BB24E1D2",
+      "amf": "8000",
+      "sqn": "000000002344",
+      "mcc": "310",
+      "mnc": "260",
+      "apn": "fast.t-mobile.com",
+      "mode": "soft"
+    },
+    {
+      "id": "SIM-004",
+      "name": "AT&T Test SIM #2",
+      "carrier": "AT&T",
+      "imsi": "310410000000002",
+      "imei": "359112052300000",
+      "ki": "AABB1F3B4C9D2E8F1234567890ABCDEF",
+      "opc": "112233445566778899AABBCCDDEEFF00",
+      "amf": "8000",
+      "sqn": "000000000001",
+      "mcc": "310",
+      "mnc": "410",
+      "apn": "broadband",
+      "mode": "soft"
+    },
+    {
+      "id": "SIM-005",
+      "name": "Physical SIM (PCSC)",
+      "carrier": "Custom",
+      "imsi": "",
+      "imei": "",
+      "ki": "",
+      "opc": "",
+      "amf": "8000",
+      "sqn": "",
+      "mcc": "",
+      "mnc": "",
+      "apn": "",
+      "mode": "pcsc"
+    }
+  ]
+}
