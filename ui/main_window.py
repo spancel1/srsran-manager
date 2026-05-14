@@ -657,40 +657,66 @@ class MainWindow(QMainWindow):
         if not self._selected_tower:
             QMessageBox.information(self, "Info", "Выберите вышку.")
             return
-        if sys.platform != "win32":
-            QMessageBox.information(self, "Deploy",
-                "На Linux/macOS скопируйте конфиги вручную через «Export all configs».")
-            return
 
         sim = self._active_tower_sim or self._selected_sim
         if not sim:
             sim = generate_sim_for_tower(self._selected_tower)
             self._active_tower_sim = sim
 
+        # On non-Windows — just export to a folder the user picks
+        if sys.platform != "win32":
+            folder = QFileDialog.getExistingDirectory(self, "Папка для конфигов")
+            if not folder:
+                return
+            subfolder = os.path.join(folder, self._selected_tower['id'])
+            export_full_bundle(self._selected_tower, sim, subfolder)
+            QMessageBox.information(self, "Экспорт",
+                f"Конфиги сохранены:\n{subfolder}")
+            return
+
+        # Check WSL is available
+        try:
+            r = subprocess.run(["wsl", "--status"],
+                               capture_output=True, text=True, timeout=8)
+            if r.returncode != 0:
+                raise FileNotFoundError
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            QMessageBox.warning(self, "WSL2 не найден",
+                "WSL2 не установлен или не запущен.\n\n"
+                "Установи: PowerShell (admin) → wsl --install\n\n"
+                "Пока используй «Export all configs» для ручного копирования.")
+            return
+
         tmp = tempfile.mkdtemp(prefix="srsran_")
         try:
             export_full_bundle(self._selected_tower, sim, tmp)
-            # Convert Windows path to WSL path
-            wsl_tmp = subprocess.run(
-                ["wsl", "wslpath", tmp.replace("\\", "/")],
-                capture_output=True, text=True).stdout.strip()
+
+            # Convert Windows temp path to WSL path
+            win_path = tmp.replace("\\", "/")
+            r2 = subprocess.run(["wsl", "wslpath", win_path],
+                                capture_output=True, text=True, timeout=8)
+            wsl_tmp = r2.stdout.strip()
+            if not wsl_tmp:
+                raise RuntimeError("wslpath вернул пустой путь")
 
             wsl_dest = "~/.config/srsran"
             cmd = (f"mkdir -p {wsl_dest} && "
                    f"cp {wsl_tmp}/*.conf {wsl_dest}/ && "
                    f"cp {wsl_tmp}/user_db.csv /tmp/srsran_user_db.csv && "
-                   f"echo OK")
-            r = subprocess.run(["wsl", "bash", "-c", cmd],
-                               capture_output=True, text=True, timeout=15)
-            if "OK" in r.stdout:
-                self._wsl_status.setText(
-                    f"WSL2: ✓ конфиги скопированы → {wsl_dest}")
+                   f"echo DONE")
+            r3 = subprocess.run(["wsl", "bash", "-c", cmd],
+                                capture_output=True, text=True, timeout=20)
+            if "DONE" in r3.stdout:
+                self._wsl_status.setText("WSL2: ✓ конфиги скопированы")
                 QMessageBox.information(self, "Deploy OK",
                     f"Конфиги скопированы в WSL2:\n{wsl_dest}\n\n"
-                    "Теперь нажми Start EPC, затем Start eNB")
+                    "Теперь нажми  Start EPC  →  Start eNB")
             else:
-                QMessageBox.warning(self, "Deploy ошибка",
-                                    r.stderr or "Неизвестная ошибка")
+                err = r3.stderr.strip() or r3.stdout.strip() or "Неизвестная ошибка"
+                QMessageBox.warning(self, "Deploy ошибка", err)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка Deploy", str(e))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

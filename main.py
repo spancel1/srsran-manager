@@ -6,16 +6,35 @@ Entry point. Run:
 """
 import sys
 import os
+import traceback
 
 # Make sure the project root is on the path when run directly
 sys.path.insert(0, os.path.dirname(__file__))
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
 from ui.main_window import MainWindow
 from ui.styles import DARK_STYLE
+
+
+def _excepthook(exc_type, exc_value, exc_tb):
+    """Show unhandled exceptions in a dialog instead of crashing silently."""
+    msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    print(msg, file=sys.stderr)
+    try:
+        dlg = QMessageBox()
+        dlg.setWindowTitle("Ошибка")
+        dlg.setIcon(QMessageBox.Icon.Critical)
+        dlg.setText(str(exc_value))
+        dlg.setDetailedText(msg)
+        dlg.exec()
+    except Exception:
+        pass
+
+
+sys.excepthook = _excepthook
 
 
 def main():
