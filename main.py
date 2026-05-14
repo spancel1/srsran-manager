@@ -24,9 +24,6 @@ def main():
     app.setOrganizationName("SRSTools")
     app.setApplicationVersion("1.0.0")
 
-    # HiDPI support
-    app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-
     # Apply dark stylesheet
     app.setStyleSheet(DARK_STYLE)
 
