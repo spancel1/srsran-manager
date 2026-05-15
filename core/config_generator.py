@@ -79,9 +79,9 @@ policy_args = 2
 [sl]
 
 [pcap]
-enable = none
-mac_filename = /tmp/enb_mac.pcap
-mac_nr_filename = /tmp/enb_mac_nr.pcap
+enable = false
+filename = /tmp/enb.pcap
+s1ap_enable = false
 s1ap_filename = /tmp/enb_s1ap.pcap
 
 [log]
