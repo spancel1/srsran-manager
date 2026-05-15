@@ -538,7 +538,7 @@ def export_tower_configs(tower: dict[str, Any], output_dir: str) -> list[str]:
     written = []
     for fname, content in files.items():
         path = os.path.join(output_dir, fname)
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
         written.append(path)
     return written
@@ -550,7 +550,7 @@ def export_ue_conf(sim: dict[str, Any], tower: dict[str, Any] | None,
     os.makedirs(output_dir, exist_ok=True)
     content = generate_ue_conf(sim, tower)
     path = os.path.join(output_dir, "ue.conf")
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
     return path
 
