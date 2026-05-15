@@ -718,6 +718,8 @@ class MainWindow(QMainWindow):
             cmd = (f"mkdir -p {wsl_dest} && "
                    f"cp {wsl_tmp}/*.conf {wsl_dest}/ && "
                    f"cp {wsl_tmp}/user_db.csv /tmp/srsran_user_db.csv && "
+                   f"sed -i 's/\\r//' {wsl_dest}/*.conf && "
+                   f"sed -i 's/\\r//' /tmp/srsran_user_db.csv && "
                    f"echo DONE")
             r3 = subprocess.run(["wsl", "bash", "-c", cmd],
                                 capture_output=True, text=True, timeout=20)
