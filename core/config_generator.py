@@ -505,17 +505,22 @@ def _apn_for_mnc(mnc: str) -> str:
 
 
 def generate_user_db(sim: dict[str, Any]) -> str:
-    """Generate user_db.csv for srsEPC HSS with this SIM subscriber."""
+    """Generate user_db.csv for srsEPC HSS with this SIM subscriber.
+
+    Format: name,auth_algo,imsi,k,op_type,op,amf,sqn,qci,ip_alloc
+    """
+    name = sim.get("id", "ue1").replace(",", "_")
     return (
         "#                                                                                    \n"
         "# .csv to store UE's secret key and OP/OPC                                         \n"
         "# Kept in the following format:                                                     \n"
-        "#  imsi, auth_algo, k, op_type, op, amf, sqn, qci, ip_alloc                        \n"
+        "#  name, auth_algo, imsi, k, op_type, op, amf, sqn, qci, ip_alloc                  \n"
         "#                                                                                    \n"
-        f"{sim['imsi']},milenage,"
-        f"{sim['ki']},"
+        f"{name},milenage,"
+        f"{sim['imsi']},"
+        f"{sim['ki'].lower()},"
         f"opc,"
-        f"{sim['opc']},"
+        f"{sim['opc'].lower()},"
         f"{sim['amf']},"
         f"{sim['sqn']},"
         f"9,dynamic\n"
