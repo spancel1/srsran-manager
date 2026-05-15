@@ -59,9 +59,9 @@ n_prb = {tower['n_prb']}
 #nof_ports = 2
 
 [enb_files]
-sib_config = sib.conf
-rr_config  = rr.conf
-rb_config  = rb.conf
+sib_config = /home/vanny/.config/srsran/sib.conf
+rr_config  = /home/vanny/.config/srsran/rr.conf
+rb_config  = /home/vanny/.config/srsran/rb.conf
 
 [rf]
 dl_earfcn = {tower['dl_earfcn']}
