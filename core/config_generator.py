@@ -510,7 +510,7 @@ def generate_user_db(sim: dict[str, Any]) -> str:
     Format: name,auth_algo,imsi,k,op_type,op,amf,sqn,qci,ip_alloc
     srsRAN uses 'mil' for Milenage, not 'milenage'.
     """
-    name = sim.get("id", "ue1").replace(",", "_")
+    name = "ue1"
     return (
         "#\n"
         "# .csv to store UE's information in HSS\n"
