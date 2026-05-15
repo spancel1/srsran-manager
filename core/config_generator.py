@@ -508,22 +508,22 @@ def generate_user_db(sim: dict[str, Any]) -> str:
     """Generate user_db.csv for srsEPC HSS with this SIM subscriber.
 
     Format: name,auth_algo,imsi,k,op_type,op,amf,sqn,qci,ip_alloc
+    srsRAN uses 'mil' for Milenage, not 'milenage'.
     """
     name = sim.get("id", "ue1").replace(",", "_")
     return (
-        "#                                                                                    \n"
-        "# .csv to store UE's secret key and OP/OPC                                         \n"
-        "# Kept in the following format:                                                     \n"
-        "#  name, auth_algo, imsi, k, op_type, op, amf, sqn, qci, ip_alloc                  \n"
-        "#                                                                                    \n"
-        f"{name},milenage,"
+        "#\n"
+        "# .csv to store UE's information in HSS\n"
+        "# Kept in the following format: \"Name,Auth,IMSI,Key,OP_Type,OP/OPc,AMF,SQN,QCI,IP_alloc\"\n"
+        "#\n"
+        f"{name},mil,"
         f"{sim['imsi']},"
         f"{sim['ki'].lower()},"
         f"opc,"
         f"{sim['opc'].lower()},"
         f"{sim['amf']},"
         f"{sim['sqn']},"
-        f"9,dynamic\n"
+        f"7,dynamic\n"
     )
 
 
