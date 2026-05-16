@@ -322,6 +322,23 @@ class MainWindow(QMainWindow):
         self._wsl_status.setStyleSheet("color:#4a5870; font-size:12px; padding:2px;")
         wsl_layout.addWidget(self._wsl_status)
 
+        # DNS field
+        dns_row = QHBoxLayout()
+        dns_label = QLabel("DNS:")
+        dns_label.setFixedWidth(35)
+        dns_row.addWidget(dns_label)
+        from PyQt6.QtWidgets import QLineEdit
+        self._dns_edit = QLineEdit("8.8.8.8")
+        self._dns_edit.setPlaceholderText("DNS сервер (например 8.8.8.8)")
+        self._dns_edit.setFixedWidth(140)
+        self._dns_edit.setToolTip("DNS адрес для абонентов сети (передаётся через EPC)")
+        dns_row.addWidget(self._dns_edit)
+        dns_row.addStretch()
+        nat_info = QLabel("NAT включается автоматически при старте EPC")
+        nat_info.setStyleSheet("color:#5a6888; font-size:11px;")
+        dns_row.addWidget(nat_info)
+        wsl_layout.addLayout(dns_row)
+
         vbox.addWidget(grp_wsl)
 
         # ── SIM card info box ──
@@ -758,13 +775,23 @@ class MainWindow(QMainWindow):
             if sys.platform != "win32":
                 QMessageBox.information(self, "Linux/macOS",
                     "Запусти в терминале:\n"
+                    "sudo sysctl -w net.ipv4.ip_forward=1\n"
+                    "sudo iptables -t nat -A POSTROUTING -s 176.16.0.0/24 -o eth0 -j MASQUERADE\n"
                     "sudo srsepc ~/.config/srsran/epc.conf")
             return
-        self._wsl_open_terminal(
-            "srsEPC",
+        dns = getattr(self, '_dns_edit', None)
+        dns_addr = dns.text().strip() if dns else "8.8.8.8"
+        if not dns_addr:
+            dns_addr = "8.8.8.8"
+        # NAT + DNS update in epc.conf + launch
+        nat_cmd = (
+            "sudo sysctl -w net.ipv4.ip_forward=1 && "
+            "sudo iptables -t nat -A POSTROUTING -s 176.16.0.0/24 -o eth0 -j MASQUERADE 2>/dev/null || true && "
+            f"sudo sed -i 's/^dns_addr.*/dns_addr = {dns_addr}/' ~/.config/srsran/epc.conf && "
             "sudo srsepc ~/.config/srsran/epc.conf"
         )
-        self._wsl_status.setText("WSL2: ▶ srsepc запускается…")
+        self._wsl_open_terminal("srsEPC", nat_cmd)
+        self._wsl_status.setText("WSL2: ▶ srsepc + NAT запускается…")
 
     def _launch_enb(self):
         if not self._check_wsl():
